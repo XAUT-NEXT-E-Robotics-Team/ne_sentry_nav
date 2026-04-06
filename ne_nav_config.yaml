@@ -1,0 +1,48 @@
+point_lio:
+  # 仅作参考。point_lio 自身有 config 文件，通常通过 point_lio 的 launch 加载
+  lid_topic: "/livox/lidar"
+  imu_topic: "/livox/imu"
+  mapping_launch: "mapping_mid360.launch.py"
+
+rog_map:
+ 
+  ros_callback:
+    enable: true
+    cloud_topic: "/cloud_registered"    # point_lio 默认发布的 topic
+    odom_topic: "/aft_mapped_to_init"   # point_lio 发布的 odom topic
+    odom_timeout: 0.05
+
+  visualization:
+    enable: true
+    pub_unknown_map_en: true
+    frame_id: "world"
+    time_rate: 5
+    frame_rate: 5
+    range: [20, 20, 6]
+
+  # 如果希望加载预存 pcd 地图,加载一个预适应得到的pcd
+  load_pcd_en: false
+  pcd_name: "pcd/random_map_2_26609.pcd"
+
+  # ESDF 与分辨率设置
+  esdf:
+    enable: true
+    resolution: 0.2
+    local_update_box: [10, 10, 6]
+
+
+  resolution: 0.2
+  inflation_resolution: 0.2
+  map_size: [50, 50, 6]
+  unk_inflation_en: true
+  unk_inflation_step: 1
+  inflation_step: 1
+  point_filt_num: 2
+
+  raycasting:
+    enable: true
+    batch_update_size: 1
+    ray_range: [0.3, 10]
+
+  virtual_ground_height: -2.0
+  virtual_ceil_height: 2.0
