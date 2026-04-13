@@ -4,10 +4,26 @@ point_lio:
   imu_topic: "/livox/imu"
   mapping_launch: "mapping_mid360.launch.py"
 
+terrain_analysis:
+  grid_resolution: 0.05
+  grid_margin: 0.5
+  timer_rate_hz: 10.0
+  obstacle_height_thresh: 0.2
+  obstacle_density_thresh: 0.1
+  neighbor_height_diff_thresh: 0.10
+  denoise_voxel_leaf_size: 0.05
+  denoise_outlier_radius: 0.15
+  denoise_outlier_min_neighbors: 4
+  min_points_per_cell: 2
+  obstacle_min_neighbors: 2
+  grid_frame_id: "world"
+  occ_topic: "/rog_map/occ"
+  grid_topic: "/terrain_analysis/grid"
+
 rog_map:
  
   ros_callback:
-    enable: true
+    enable: false
     cloud_topic: "/cloud_registered"    # point_lio 默认发布的 topic
     odom_topic: "/aft_mapped_to_init"   # point_lio 发布的 odom topic
     odom_timeout: 0.05
@@ -17,32 +33,47 @@ rog_map:
     pub_unknown_map_en: true
     frame_id: "world"
     time_rate: 5
-    frame_rate: 5
-    range: [20, 20, 6]
-
+    frame_rate: 10
+    range: [50, 50, 100]
+  map_sliding:
+    enable: true
+    threshold: 0.0
   # 如果希望加载预存 pcd 地图,加载一个预适应得到的pcd
-  load_pcd_en: false
-  pcd_name: "pcd/random_map_2_26609.pcd"
+  load_pcd_en: true
+  pcd_name: "/home/ei/ne_nav/src/ne_rog_map/pcd/rmuc_2025.pcd"
+  # 预加载 pcd 位姿补偿（作用于 pcd 本身，不依赖 tf）
+  # 四元数顺序: [w, x, y, z]
+  pcd_pose:
+    translation: [0.0, 0.0, 0.0]
+    rotation_wxyz: [0.9659, 0.2588, 0.0, 0.0] #绕x轴转30度
 
   # ESDF 与分辨率设置
   esdf:
-    enable: true
-    resolution: 0.2
-    local_update_box: [10, 10, 6]
+    enable: false
+    resolution: 0.05
+    local_update_box: [12,12,0.2]
 
 
-  resolution: 0.2
-  inflation_resolution: 0.2
-  map_size: [50, 50, 6]
+  resolution: 0.05
+  inflation_resolution: 0.05
+  map_size: [50, 50, 0.8]
   unk_inflation_en: true
   unk_inflation_step: 1
   inflation_step: 1
-  point_filt_num: 2
+  point_filt_num: 1
 
   raycasting:
     enable: true
-    batch_update_size: 1
-    ray_range: [0.3, 10]
+    batch_update_size: 10
+    ray_range: [0.0, 50]
+    local_update_box: [50,50,5]
+    p_min: 0.12
+    p_miss: 0.49
+    p_free: 0.40
+    p_occ: 0.70
+    p_hit: 0.83
+    p_max: 0.90
+    unk_thresh: 0.5
 
-  virtual_ground_height: -2.0
-  virtual_ceil_height: 2.0
+  virtual_ground_height: -9999.0
+  virtual_ceil_height: 9999.0
