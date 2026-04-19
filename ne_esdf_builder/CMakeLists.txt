@@ -6,6 +6,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(Eigen3 REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -23,6 +24,8 @@ add_executable(esdf_visualizer_node
 target_include_directories(esdf_builder_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
+  ${EIGEN3_INCLUDE_DIR}
+  ${Eigen3_INCLUDE_DIRS}
 )
 
 target_include_directories(esdf_visualizer_node PUBLIC
