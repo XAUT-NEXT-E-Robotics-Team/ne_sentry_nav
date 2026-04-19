@@ -10,11 +10,8 @@
  */
 #include "ne_esdf_builder/esdf_builder_node.hpp"
 
-#include <array>
 #include <cmath>
 #include <limits>
-#include <queue>
-#include <utility>
 #include <vector>
 
 namespace esdf_builder
@@ -25,63 +22,134 @@ namespace
 
 constexpr float kInfDistance = std::numeric_limits<float>::infinity();
 
-std::vector<float> compute_distance_field(
-    const std::vector<uint8_t> &source_mask,
-    int width,
-    int height)
+inline std::size_t to_address(int x, int y, int cols)
 {
-    using QueueItem = std::pair<float, int>;
-    std::priority_queue<QueueItem, std::vector<QueueItem>, std::greater<QueueItem>> queue;
+    return static_cast<std::size_t>(x) * static_cast<std::size_t>(cols) +
+           static_cast<std::size_t>(y);
+}
 
-    std::vector<float> distances(
-        static_cast<std::size_t>(width) * static_cast<std::size_t>(height),
-        kInfDistance);
+template<typename FGetVal, typename FSetVal>
+void fill_esdf(FGetVal f_get_val, FSetVal f_set_val, int start, int end, int size)
+{
+    std::vector<int> v(static_cast<std::size_t>(size));
+    std::vector<double> z(static_cast<std::size_t>(size + 1));
 
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const int id = y * width + x;
-            if (source_mask[static_cast<std::size_t>(id)] == 0U) {
-                continue;
+    int k = start;
+    v[static_cast<std::size_t>(start)] = start;
+    z[static_cast<std::size_t>(start)] = -std::numeric_limits<double>::max();
+    z[static_cast<std::size_t>(start + 1)] = std::numeric_limits<double>::max();
+
+    for (int q = start + 1; q <= end; ++q) {
+        ++k;
+        double s = 0.0;
+        do {
+            --k;
+            s = ((f_get_val(q) + static_cast<double>(q * q)) -
+                 (f_get_val(v[static_cast<std::size_t>(k)]) +
+                  static_cast<double>(v[static_cast<std::size_t>(k)] * v[static_cast<std::size_t>(k)]))) /
+                static_cast<double>(2 * q - 2 * v[static_cast<std::size_t>(k)]);
+        } while (s <= z[static_cast<std::size_t>(k)]);
+
+        ++k;
+        v[static_cast<std::size_t>(k)] = q;
+        z[static_cast<std::size_t>(k)] = s;
+        z[static_cast<std::size_t>(k + 1)] = std::numeric_limits<double>::max();
+    }
+
+    k = start;
+    for (int q = start; q <= end; ++q) {
+        while (z[static_cast<std::size_t>(k + 1)] < static_cast<double>(q)) {
+            ++k;
+        }
+        const double val = static_cast<double>((q - v[static_cast<std::size_t>(k)]) *
+                                               (q - v[static_cast<std::size_t>(k)])) +
+                           f_get_val(v[static_cast<std::size_t>(k)]);
+        f_set_val(q, val);
+    }
+}
+
+std::vector<float> compute_signed_esdf(
+    const std::vector<uint8_t> &occupancy_map,
+    int width,
+    int height,
+    float resolution)
+{
+    const int rows = width;
+    const int cols = height;
+    const std::size_t cell_count = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols);
+    const double inf = std::numeric_limits<double>::max();
+
+    std::vector<double> tmp_buffer(cell_count, inf);
+    std::vector<double> pos_buffer(cell_count, inf);
+    std::vector<double> neg_buffer(cell_count, inf);
+    std::vector<uint8_t> free_map(cell_count, 0U);
+    std::vector<float> esdf_buffer(cell_count, kInfDistance);
+
+    for (std::size_t i = 0; i < cell_count; ++i) {
+        free_map[i] = occupancy_map[i] == 0U ? 1U : 0U;
+    }
+
+    for (int x = 0; x < rows; ++x) {
+        fill_esdf(
+            [&](int y) {
+                return occupancy_map[to_address(x, y, cols)] != 0U ? 0.0 : inf;
+            },
+            [&](int y, double val) {
+                tmp_buffer[to_address(x, y, cols)] = val;
+            },
+            0, cols - 1, cols);
+    }
+
+    for (int y = 0; y < cols; ++y) {
+        fill_esdf(
+            [&](int x) {
+                return tmp_buffer[to_address(x, y, cols)];
+            },
+            [&](int x, double val) {
+                pos_buffer[to_address(x, y, cols)] =
+                    static_cast<double>(resolution) * std::sqrt(val);
+            },
+            0, rows - 1, rows);
+    }
+
+    for (int x = 0; x < rows; ++x) {
+        fill_esdf(
+            [&](int y) {
+                return free_map[to_address(x, y, cols)] != 0U ? 0.0 : inf;
+            },
+            [&](int y, double val) {
+                tmp_buffer[to_address(x, y, cols)] = val;
+            },
+            0, cols - 1, cols);
+    }
+
+    for (int y = 0; y < cols; ++y) {
+        fill_esdf(
+            [&](int x) {
+                return tmp_buffer[to_address(x, y, cols)];
+            },
+            [&](int x, double val) {
+                neg_buffer[to_address(x, y, cols)] =
+                    static_cast<double>(resolution) * std::sqrt(val);
+            },
+            0, rows - 1, rows);
+    }
+
+    for (int x = 0; x < rows; ++x) {
+        for (int y = 0; y < cols; ++y) {
+            const std::size_t id = to_address(x, y, cols);
+            const double pos_dist = pos_buffer[id];
+            const double neg_dist = std::abs(neg_buffer[id]);
+
+            if (neg_dist > 0.0) {
+                esdf_buffer[id] = static_cast<float>(-neg_dist + static_cast<double>(resolution));
+            } else {
+                esdf_buffer[id] = static_cast<float>(pos_dist);
             }
-            distances[static_cast<std::size_t>(id)] = 0.0F;
-            queue.emplace(0.0F, id);
         }
     }
 
-    constexpr std::array<int, 8> kDx{{-1, 0, 1, -1, 1, -1, 0, 1}};
-    constexpr std::array<int, 8> kDy{{-1, -1, -1, 0, 0, 1, 1, 1}};
-    constexpr std::array<float, 8> kStepCost{
-        {1.41421356F, 1.0F, 1.41421356F, 1.0F, 1.0F, 1.41421356F, 1.0F, 1.41421356F}};
-
-    while (!queue.empty()) {
-        const auto [current_distance, id] = queue.top();
-        queue.pop();
-
-        if (current_distance > distances[static_cast<std::size_t>(id)]) {
-            continue;
-        }
-
-        const int x = id % width;
-        const int y = id / width;
-        for (std::size_t i = 0; i < kDx.size(); ++i) {
-            const int nx = x + kDx[i];
-            const int ny = y + kDy[i];
-            if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
-                continue;
-            }
-
-            const int nid = ny * width + nx;
-            const float candidate = current_distance + kStepCost[i];
-            if (candidate >= distances[static_cast<std::size_t>(nid)]) {
-                continue;
-            }
-
-            distances[static_cast<std::size_t>(nid)] = candidate;
-            queue.emplace(candidate, nid);
-        }
-    }
-
-    return distances;
+    return esdf_buffer;
 }
 
 }  // namespace
@@ -131,36 +199,40 @@ void ESDF::grid_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
         return;
     }
 
-    std::vector<uint8_t> obstacle_map(cell_count, 0U);
-    std::vector<uint8_t> free_map(cell_count, 0U);
+    std::vector<uint8_t> occupancy_map(cell_count, 0U);
 
-    for (std::size_t i = 0; i < cell_count; ++i) {
-        const int8_t value = msg->data[i];
-        if (value < 0) {
-            obstacle_map[i] = treat_unknown_as_obstacle_ ? 1U : 0U;
-            free_map[i] = treat_unknown_as_obstacle_ ? 0U : 1U;
-            continue;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const std::size_t ros_id =
+                static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                static_cast<std::size_t>(x);
+            const std::size_t esdf_id = to_address(x, y, height);
+            const int8_t value = msg->data[ros_id];
+
+            if (value < 0) {
+                occupancy_map[esdf_id] = treat_unknown_as_obstacle_ ? 1U : 0U;
+                continue;
+            }
+
+            const bool occupied = value >= obs_thresh_;
+            occupancy_map[esdf_id] = occupied ? 1U : 0U;
         }
-
-        const bool occupied = value >= obs_thresh_;
-        obstacle_map[i] = occupied ? 1U : 0U;
-        free_map[i] = occupied ? 0U : 1U;
     }
 
-    const auto distance_to_obstacle = compute_distance_field(obstacle_map, width, height);
-    const auto distance_to_free = compute_distance_field(free_map, width, height);
+    const auto esdf_buffer = compute_signed_esdf(occupancy_map, width, height, resolution);
 
     nav_interfaces::msg::Esdf esdf_msg;
     esdf_msg.header = msg->header;
     esdf_msg.info = msg->info;
     esdf_msg.data.resize(cell_count, 0.0F);
 
-    for (std::size_t i = 0; i < cell_count; ++i) {
-        const bool occupied = obstacle_map[i] != 0U;
-        const float grid_distance = occupied ? distance_to_free[i] : distance_to_obstacle[i];
-        const float metric_distance = std::isfinite(grid_distance) ? grid_distance * resolution
-                                                                   : kInfDistance;
-        esdf_msg.data[i] = occupied ? -metric_distance : metric_distance;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const std::size_t ros_id =
+                static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                static_cast<std::size_t>(x);
+            esdf_msg.data[ros_id] = esdf_buffer[to_address(x, y, height)];
+        }
     }
 
     esdf_map_pub_->publish(esdf_msg);

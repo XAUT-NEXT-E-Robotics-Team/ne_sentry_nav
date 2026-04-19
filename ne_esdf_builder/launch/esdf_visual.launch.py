@@ -34,6 +34,7 @@ def generate_launch_description():
                 "warn_distance": 0.6,
                 "marker_alpha": 0.85,
                 "marker_height_scale": 0.2,
+                "rainbow_max_distance": 0.6,
             }
         ],
     )

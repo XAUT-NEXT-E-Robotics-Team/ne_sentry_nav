@@ -15,6 +15,7 @@
 
 #include "nav_interfaces/msg/esdf.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/color_rgba.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 
 namespace esdf_builder
@@ -29,6 +30,7 @@ public:
 private:
     void init();
     void esdfCallback(const nav_interfaces::msg::Esdf::SharedPtr msg);
+    std_msgs::msg::ColorRGBA makeRainbowColor(float distance) const;
 
     rclcpp::Subscription<nav_interfaces::msg::Esdf>::SharedPtr esdf_sub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
@@ -39,6 +41,7 @@ private:
     double warn_distance_{0.6};
     double marker_alpha_{0.85};
     double marker_height_scale_{0.2};
+    double rainbow_max_distance_{0.6};
 };
 
 }  // namespace esdf_builder
