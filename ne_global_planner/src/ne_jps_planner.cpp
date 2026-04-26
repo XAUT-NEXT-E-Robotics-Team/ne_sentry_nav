@@ -7,7 +7,9 @@
 #include <utility>
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 #include "geometry_msgs/msg/point.hpp"
+#include "geometry_msgs/msg/point_stamped.hpp"
 #include "visualization_msgs/msg/marker.hpp"
 
 namespace jps_planner
@@ -63,11 +65,16 @@ void JpsPlannerNode::init()
         "optimized_path_topic",
         optimized_path_topic_);
     path_marker_topic_ = this->declare_parameter<std::string>("path_marker_topic", path_marker_topic_);
+    clicked_point_topic_ = this->declare_parameter<std::string>("clicked_point_topic", clicked_point_topic_);
+    initial_pose_topic_ = this->declare_parameter<std::string>("initial_pose_topic", initial_pose_topic_);
+    goal_pose_topic_ = this->declare_parameter<std::string>("goal_pose_topic", goal_pose_topic_);
 
     start_pos_.x() = this->declare_parameter<double>("start_x", start_pos_.x());
     start_pos_.y() = this->declare_parameter<double>("start_y", start_pos_.y());
     goal_pos_.x() = this->declare_parameter<double>("goal_x", goal_pos_.x());
     goal_pos_.y() = this->declare_parameter<double>("goal_y", goal_pos_.y());
+    has_start_ = true;
+    has_goal_ = true;
 
     safe_distance_ = this->declare_parameter<double>("safe_distance", safe_distance_);
     traj_total_time_ = this->declare_parameter<double>("traj_total_time", traj_total_time_);
@@ -84,6 +91,18 @@ void JpsPlannerNode::init()
         esdf_topic_,
         qos,
         std::bind(&JpsPlannerNode::esdfCallback, this, std::placeholders::_1));
+    clicked_point_sub_ = this->create_subscription<geometry_msgs::msg::PointStamped>(
+        clicked_point_topic_,
+        qos,
+        std::bind(&JpsPlannerNode::clickedPointCallback, this, std::placeholders::_1));
+    initial_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+        initial_pose_topic_,
+        qos,
+        std::bind(&JpsPlannerNode::initialPoseCallback, this, std::placeholders::_1));
+    goal_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+        goal_pose_topic_,
+        qos,
+        std::bind(&JpsPlannerNode::goalPoseCallback, this, std::placeholders::_1));
 
     jps_path_pub_ = this->create_publisher<nav_msgs::msg::Path>(jps_path_topic_, qos);
     optimized_path_pub_ = this->create_publisher<nav_msgs::msg::Path>(optimized_path_topic_, qos);
@@ -94,7 +113,7 @@ void JpsPlannerNode::init()
 
 void JpsPlannerNode::esdfCallback(const nav_interfaces::msg::Esdf::SharedPtr msg)
 {
-    if (!msg || !plan_on_map_update_) {
+    if (!msg) {
         return;
     }
 
@@ -110,12 +129,100 @@ void JpsPlannerNode::esdfCallback(const nav_interfaces::msg::Esdf::SharedPtr msg
         return;
     }
 
+    latest_esdf_msg_ = msg;
     map_->reset(msg->info, msg->data);
-    makePlan(*msg);
+    if (plan_on_map_update_) {
+        makePlan(*msg);
+    }
+}
+
+void JpsPlannerNode::clickedPointCallback(const geometry_msgs::msg::PointStamped::SharedPtr msg)
+{
+    if (!msg) {
+        return;
+    }
+
+    const Vector2d pos(msg->point.x, msg->point.y);
+    if (!awaiting_clicked_goal_) {
+        start_pos_ = pos;
+        has_start_ = true;
+        awaiting_clicked_goal_ = true;
+        RCLCPP_INFO(
+            this->get_logger(),
+            "clicked start set to (%.3f, %.3f); click another point to set the goal",
+            start_pos_.x(),
+            start_pos_.y());
+        return;
+    }
+
+    goal_pos_ = pos;
+    has_goal_ = true;
+    awaiting_clicked_goal_ = false;
+    RCLCPP_INFO(
+        this->get_logger(),
+        "clicked goal set to (%.3f, %.3f); planning from clicked start",
+        goal_pos_.x(),
+        goal_pos_.y());
+    tryPlanFromCurrentMap();
+}
+
+void JpsPlannerNode::initialPoseCallback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
+{
+    if (!msg) {
+        return;
+    }
+
+    start_pos_.x() = msg->pose.pose.position.x;
+    start_pos_.y() = msg->pose.pose.position.y;
+    has_start_ = true;
+    awaiting_clicked_goal_ = false;
+    RCLCPP_INFO(
+        this->get_logger(),
+        "start pose updated from RViz initial pose: (%.3f, %.3f)",
+        start_pos_.x(),
+        start_pos_.y());
+}
+
+void JpsPlannerNode::goalPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+{
+    if (!msg) {
+        return;
+    }
+
+    goal_pos_.x() = msg->pose.position.x;
+    goal_pos_.y() = msg->pose.position.y;
+    has_goal_ = true;
+    awaiting_clicked_goal_ = false;
+    RCLCPP_INFO(
+        this->get_logger(),
+        "goal pose updated from RViz goal tool: (%.3f, %.3f)",
+        goal_pos_.x(),
+        goal_pos_.y());
+    tryPlanFromCurrentMap();
+}
+
+bool JpsPlannerNode::tryPlanFromCurrentMap()
+{
+    if (!latest_esdf_msg_) {
+        RCLCPP_WARN(this->get_logger(), "cannot plan yet: no ESDF map has been received");
+        return false;
+    }
+    if (!has_start_ || !has_goal_) {
+        RCLCPP_WARN(this->get_logger(), "cannot plan yet: start or goal has not been set");
+        return false;
+    }
+
+    map_->reset(latest_esdf_msg_->info, latest_esdf_msg_->data);
+    return makePlan(*latest_esdf_msg_);
 }
 
 bool JpsPlannerNode::makePlan(const nav_interfaces::msg::Esdf & msg)
 {
+    if (!has_start_ || !has_goal_) {
+        RCLCPP_WARN(this->get_logger(), "start or goal is not available yet");
+        return false;
+    }
+
     Eigen::Vector2i start_idx;
     Eigen::Vector2i goal_idx;
     if (!worldToIndex(start_pos_, start_idx) || !worldToIndex(goal_pos_, goal_idx)) {
@@ -212,9 +319,33 @@ bool JpsPlannerNode::makePlan(const nav_interfaces::msg::Esdf & msg)
         optimized_path_pub_->publish(makePathMsg(raw_path, msg.header));
         visualization_msgs::msg::MarkerArray marker_array;
         marker_array.markers.push_back(
-            makePathMarker(raw_path, msg.header, "jps_raw_path", 0, 1.0F, 0.2F, 0.2F, path_z_offset_));
+            makeLineStripMarker(
+                raw_path, msg.header, "jps_raw_path", 0, 0.95F, 0.35F, 0.30F, 0.35F,
+                marker_line_width_ * 2.2, path_z_offset_));
         marker_array.markers.push_back(
-            makePathMarker(raw_path, msg.header, "jps_optimized_path", 1, 0.1F, 1.0F, 0.2F, path_z_offset_ * 1.5));
+            makeLineStripMarker(
+                raw_path, msg.header, "jps_raw_path", 1, 1.0F, 0.45F, 0.35F, 0.95F,
+                marker_line_width_, path_z_offset_));
+        marker_array.markers.push_back(
+            makePointListMarker(
+                raw_path, msg.header, "jps_raw_path_points", 2, 1.0F, 0.82F, 0.25F, 0.95F,
+                marker_line_width_ * 2.4, path_z_offset_));
+        marker_array.markers.push_back(
+            makeLineStripMarker(
+                raw_path, msg.header, "jps_optimized_path", 3, 0.30F, 1.0F, 0.55F, 0.28F,
+                marker_line_width_ * 2.8, path_z_offset_ * 1.5));
+        marker_array.markers.push_back(
+            makeLineStripMarker(
+                raw_path, msg.header, "jps_optimized_path", 4, 0.12F, 0.95F, 0.42F, 0.98F,
+                marker_line_width_ * 1.25, path_z_offset_ * 1.5));
+        marker_array.markers.push_back(
+            makeEndpointMarker(
+                raw_path.front(), msg.header, "planner_endpoints", 5, 0.25F, 0.65F, 1.0F, 0.98F,
+                marker_line_width_ * 4.5, path_z_offset_ * 1.8));
+        marker_array.markers.push_back(
+            makeEndpointMarker(
+                raw_path.back(), msg.header, "planner_endpoints", 6, 1.0F, 0.30F, 0.30F, 0.98F,
+                marker_line_width_ * 4.5, path_z_offset_ * 1.8));
         path_marker_pub_->publish(marker_array);
         return true;
     }
@@ -226,9 +357,33 @@ bool JpsPlannerNode::makePlan(const nav_interfaces::msg::Esdf & msg)
         optimized_path_pub_->publish(makePathMsg(raw_path, msg.header));
         visualization_msgs::msg::MarkerArray marker_array;
         marker_array.markers.push_back(
-            makePathMarker(raw_path, msg.header, "jps_raw_path", 0, 1.0F, 0.2F, 0.2F, path_z_offset_));
+            makeLineStripMarker(
+                raw_path, msg.header, "jps_raw_path", 0, 0.95F, 0.35F, 0.30F, 0.35F,
+                marker_line_width_ * 2.2, path_z_offset_));
         marker_array.markers.push_back(
-            makePathMarker(raw_path, msg.header, "jps_optimized_path", 1, 0.1F, 1.0F, 0.2F, path_z_offset_ * 1.5));
+            makeLineStripMarker(
+                raw_path, msg.header, "jps_raw_path", 1, 1.0F, 0.45F, 0.35F, 0.95F,
+                marker_line_width_, path_z_offset_));
+        marker_array.markers.push_back(
+            makePointListMarker(
+                raw_path, msg.header, "jps_raw_path_points", 2, 1.0F, 0.82F, 0.25F, 0.95F,
+                marker_line_width_ * 2.4, path_z_offset_));
+        marker_array.markers.push_back(
+            makeLineStripMarker(
+                raw_path, msg.header, "jps_optimized_path", 3, 0.30F, 1.0F, 0.55F, 0.28F,
+                marker_line_width_ * 2.8, path_z_offset_ * 1.5));
+        marker_array.markers.push_back(
+            makeLineStripMarker(
+                raw_path, msg.header, "jps_optimized_path", 4, 0.12F, 0.95F, 0.42F, 0.98F,
+                marker_line_width_ * 1.25, path_z_offset_ * 1.5));
+        marker_array.markers.push_back(
+            makeEndpointMarker(
+                raw_path.front(), msg.header, "planner_endpoints", 5, 0.25F, 0.65F, 1.0F, 0.98F,
+                marker_line_width_ * 4.5, path_z_offset_ * 1.8));
+        marker_array.markers.push_back(
+            makeEndpointMarker(
+                raw_path.back(), msg.header, "planner_endpoints", 6, 1.0F, 0.30F, 0.30F, 0.98F,
+                marker_line_width_ * 4.5, path_z_offset_ * 1.8));
         path_marker_pub_->publish(marker_array);
         return false;
     }
@@ -253,32 +408,50 @@ bool JpsPlannerNode::makePlan(const nav_interfaces::msg::Esdf & msg)
     if (!optimized_safe) {
         RCLCPP_WARN(
             this->get_logger(),
-            "optimized trajectory intersects obstacle or violates safe_distance, publishing raw JPS path");
-        optimized_path_pub_->publish(makePathMsg(raw_path, msg.header));
-    } else {
-        optimized_path_pub_->publish(makePathMsg(optimized_path, msg.header));
+            "optimized trajectory intersects obstacle or violates safe_distance, publishing optimized path anyway");
     }
+    optimized_path_pub_->publish(makePathMsg(optimized_path, msg.header));
 
     visualization_msgs::msg::MarkerArray marker_array;
     marker_array.markers.push_back(
-        makePathMarker(raw_path, msg.header, "jps_raw_path", 0, 1.0F, 0.2F, 0.2F, path_z_offset_));
+        makeLineStripMarker(
+            raw_path, msg.header, "jps_raw_path", 0, 0.95F, 0.35F, 0.30F, 0.32F,
+            marker_line_width_ * 1.9, path_z_offset_));
     marker_array.markers.push_back(
-        makePathMarker(
-            optimized_safe ? optimized_path : raw_path,
-            msg.header,
-            "jps_optimized_path",
-            1,
-            0.1F,
-            1.0F,
-            0.2F,
-            path_z_offset_ * 1.5));
+        makeLineStripMarker(
+            raw_path, msg.header, "jps_raw_path", 1, 1.0F, 0.45F, 0.35F, 0.90F,
+            marker_line_width_ * 0.9, path_z_offset_));
+    marker_array.markers.push_back(
+        makePointListMarker(
+            raw_path, msg.header, "jps_raw_path_points", 2, 1.0F, 0.82F, 0.25F, 0.92F,
+            marker_line_width_ * 2.1, path_z_offset_));
+    marker_array.markers.push_back(
+        makeLineStripMarker(
+            optimized_path, msg.header, "jps_optimized_path", 3, 0.30F, 1.0F, 0.55F, 0.30F,
+            marker_line_width_ * 3.0, path_z_offset_ * 1.5));
+    marker_array.markers.push_back(
+        makeLineStripMarker(
+            optimized_path, msg.header, "jps_optimized_path", 4, 0.12F, 0.95F, 0.42F, 0.98F,
+            marker_line_width_ * 1.35, path_z_offset_ * 1.5));
+    marker_array.markers.push_back(
+        makePointListMarker(
+            optimized_path, msg.header, "jps_optimized_path_points", 5, 0.75F, 1.0F, 0.82F, 0.90F,
+            marker_line_width_ * 1.6, path_z_offset_ * 1.5));
+    marker_array.markers.push_back(
+        makeEndpointMarker(
+            raw_path.front(), msg.header, "planner_endpoints", 6, 0.25F, 0.65F, 1.0F, 0.98F,
+            marker_line_width_ * 4.5, path_z_offset_ * 1.8));
+    marker_array.markers.push_back(
+        makeEndpointMarker(
+            optimized_path.back(), msg.header, "planner_endpoints", 7, 1.0F, 0.30F, 0.30F, 0.98F,
+            marker_line_width_ * 4.5, path_z_offset_ * 1.8));
     path_marker_pub_->publish(marker_array);
 
     RCLCPP_INFO(
         this->get_logger(),
         "published JPS path with %zu points and optimized trajectory with %zu points",
         raw_path.size(),
-        optimized_safe ? optimized_path.size() : raw_path.size());
+        optimized_path.size());
     return true;
 }
 
@@ -453,7 +626,7 @@ nav_msgs::msg::Path JpsPlannerNode::makePathMsg(
     return msg;
 }
 
-visualization_msgs::msg::Marker JpsPlannerNode::makePathMarker(
+visualization_msgs::msg::Marker JpsPlannerNode::makeLineStripMarker(
     const std::vector<Vector2d> & path,
     const std_msgs::msg::Header & header,
     const std::string & ns,
@@ -461,6 +634,8 @@ visualization_msgs::msg::Marker JpsPlannerNode::makePathMarker(
     float r,
     float g,
     float b,
+    float a,
+    double line_width,
     double z_offset) const
 {
     visualization_msgs::msg::Marker marker;
@@ -470,11 +645,11 @@ visualization_msgs::msg::Marker JpsPlannerNode::makePathMarker(
     marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
     marker.action = visualization_msgs::msg::Marker::ADD;
     marker.pose.orientation.w = 1.0;
-    marker.scale.x = std::max(marker_line_width_, 1e-3);
+    marker.scale.x = std::max(line_width, 1e-3);
     marker.color.r = r;
     marker.color.g = g;
     marker.color.b = b;
-    marker.color.a = 1.0F;
+    marker.color.a = a;
 
     marker.points.reserve(path.size());
     for (const auto & point : path) {
@@ -485,6 +660,77 @@ visualization_msgs::msg::Marker JpsPlannerNode::makePathMarker(
         marker.points.push_back(std::move(marker_point));
     }
 
+    return marker;
+}
+
+visualization_msgs::msg::Marker JpsPlannerNode::makePointListMarker(
+    const std::vector<Vector2d> & path,
+    const std_msgs::msg::Header & header,
+    const std::string & ns,
+    int id,
+    float r,
+    float g,
+    float b,
+    float a,
+    double point_size,
+    double z_offset) const
+{
+    visualization_msgs::msg::Marker marker;
+    marker.header = header;
+    marker.ns = ns;
+    marker.id = id;
+    marker.type = visualization_msgs::msg::Marker::SPHERE_LIST;
+    marker.action = visualization_msgs::msg::Marker::ADD;
+    marker.pose.orientation.w = 1.0;
+    marker.scale.x = std::max(point_size, 1e-3);
+    marker.scale.y = std::max(point_size, 1e-3);
+    marker.scale.z = std::max(point_size * 0.45, 1e-3);
+    marker.color.r = r;
+    marker.color.g = g;
+    marker.color.b = b;
+    marker.color.a = a;
+
+    marker.points.reserve(path.size());
+    for (const auto & point : path) {
+        geometry_msgs::msg::Point marker_point;
+        marker_point.x = point.x();
+        marker_point.y = point.y();
+        marker_point.z = z_offset;
+        marker.points.push_back(std::move(marker_point));
+    }
+
+    return marker;
+}
+
+visualization_msgs::msg::Marker JpsPlannerNode::makeEndpointMarker(
+    const Vector2d & point,
+    const std_msgs::msg::Header & header,
+    const std::string & ns,
+    int id,
+    float r,
+    float g,
+    float b,
+    float a,
+    double point_size,
+    double z_offset) const
+{
+    visualization_msgs::msg::Marker marker;
+    marker.header = header;
+    marker.ns = ns;
+    marker.id = id;
+    marker.type = visualization_msgs::msg::Marker::SPHERE;
+    marker.action = visualization_msgs::msg::Marker::ADD;
+    marker.pose.position.x = point.x();
+    marker.pose.position.y = point.y();
+    marker.pose.position.z = z_offset;
+    marker.pose.orientation.w = 1.0;
+    marker.scale.x = std::max(point_size, 1e-3);
+    marker.scale.y = std::max(point_size, 1e-3);
+    marker.scale.z = std::max(point_size, 1e-3);
+    marker.color.r = r;
+    marker.color.g = g;
+    marker.color.b = b;
+    marker.color.a = a;
     return marker;
 }
 

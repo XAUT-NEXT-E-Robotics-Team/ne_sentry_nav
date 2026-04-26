@@ -199,7 +199,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "safe_distance",
-                default_value="0.3",
+                default_value="0.5",
                 description="Safety distance used by JPS and trajectory optimization.",
             ),
             DeclareLaunchArgument(
@@ -214,7 +214,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "traj_piece_len",
-                default_value="10.0",
+                default_value="4.0",
                 description="Target path length per spline segment.",
             ),
             DeclareLaunchArgument(

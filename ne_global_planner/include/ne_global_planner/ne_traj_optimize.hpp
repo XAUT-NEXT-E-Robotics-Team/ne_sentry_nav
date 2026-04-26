@@ -2,7 +2,7 @@
  * @Author: ei_code_bash && 3080152159@qq.com
  * @Date: 2026-04-19 16:14:51
  * @LastEditors: ei_code_bash && 3080152159@qq.com
- * @LastEditTime: 2026-04-25 22:27:46
+ * @LastEditTime: 2026-04-26 13:01:45
  * @FilePath: /ne_nav/src/ne_global_planner/include/ne_global_planner/ne_traj_optimize.hpp
  * @Description: 我永远喜欢雪之下雪乃
  *
@@ -31,10 +31,10 @@ namespace ne_traj_opt
 struct TrajectoryParams
 {
     double total_len = 10.0;
-    double total_time = 10.0;
+    double total_time = 15.0;
     double piece_len = 2.0;
     double rho_v = 10000.0;           // Velocity penalty weight
-    double rho_collision = 100000.0;  // Collision penalty weight
+    double rho_collision = 1000000.0;  // Collision penalty weight
     double rho_T = 100.0;             // Time penalty weight
     double rho_energy = 500.0;        // Energy (smoothness) penalty weight
     double max_v = 2.0;               // Maximum velocity
